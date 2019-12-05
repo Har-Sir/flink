@@ -23,11 +23,11 @@ specific language governing permissions and limitations
 under the License.
 -->
 
-Catalogs provide metadata, such as database, tables, partitions, views, and functions and information needed to access data stored in a database or other external systems.
+Catalogs provide metadata, such as databases, tables, partitions, views, and functions and information needed to access data stored in a database or other external systems.
 
 One of the most crucial aspects of data processing is managing metadata.
-It may be transient metadata like temporary tables, or UDF's registered against the table environment.
-Or permanent metadata, like a Hive Metastore. Catalogs provide a unified API for managing metadata and making it accessible from the Table API and SQL Queries. 
+It may be transient metadata like temporary tables, or UDFs registered against the table environment.
+Or permanent metadata, like that in a Hive Metastore. Catalogs provide a unified API for managing metadata and making it accessible from the Table API and SQL Queries. 
 
 * This will be replaced by the TOC
 {:toc}
@@ -36,8 +36,7 @@ Or permanent metadata, like a Hive Metastore. Catalogs provide a unified API for
 
 ### GenericInMemoryCatalog
 
-Flink sessions always have a built-in `GenericInMemoryCatalog` named `default_catalog`, which has a built-in default database named `default_database`.
-All temporary metadata, such tables defined using `TableEnvironment#registerTable` is registered to this catalog. 
+The `GenericInMemoryCatalog` is an in-memory implementation of a catalog. All objects will be available only for the lifetime of the session.
 
 ### HiveCatalog
 
@@ -59,7 +58,8 @@ The set of properties will be passed to a discovery service where the service tr
 
 ### Registering a Catalog
 
-Users can register additional catalogs into an existing Flink session.
+Users have access to a default in-memory catalog named `default_catalog`, that is always created by default. This catalog by default has a single database called `default_database`.
+Users can also register additional catalogs into an existing Flink session.
 
 <div class="codetabs" markdown="1">
 <div data-lang="Java/Scala" markdown="1">
@@ -124,7 +124,7 @@ Metadata from catalogs that are not the current catalog are accessible by provid
 <div class="codetabs" markdown="1">
 <div data-lang="Java/Scala" markdown="1">
 {% highlight java %}
-tableEnv.scan("not_the_current_catalog", "not_the_current_db", "my_table");
+tableEnv.from("not_the_current_catalog.not_the_current_db.my_table");
 {% endhighlight %}
 </div>
 <div data-lang="SQL" markdown="1">

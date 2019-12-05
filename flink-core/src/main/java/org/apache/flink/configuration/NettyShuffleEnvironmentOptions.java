@@ -64,24 +64,11 @@ public class NettyShuffleEnvironmentOptions {
 			.withDescription("Boolean flag to enable/disable more detailed metrics about inbound/outbound network queue lengths.");
 
 	/**
-	 * Boolean flag to enable/disable network credit-based flow control.
-	 *
-	 * @deprecated Will be removed for Flink 1.6 when the old code will be dropped in favour of
-	 * credit-based flow control.
-	 */
-	@Deprecated
-	public static final ConfigOption<Boolean> NETWORK_CREDIT_MODEL =
-		key("taskmanager.network.credit-model")
-			.defaultValue(true)
-			.withDeprecatedKeys("taskmanager.network.credit-based-flow-control.enabled")
-			.withDescription("Boolean flag to enable/disable network credit-based flow control.");
-
-	/**
 	 * Number of buffers used in the network stack. This defines the number of possible tasks and
 	 * shuffles.
 	 *
-	 * @deprecated use {@link #NETWORK_BUFFERS_MEMORY_FRACTION}, {@link #NETWORK_BUFFERS_MEMORY_MIN},
-	 * and {@link #NETWORK_BUFFERS_MEMORY_MAX} instead
+	 * @deprecated use {@link TaskManagerOptions#SHUFFLE_MEMORY_FRACTION}, {@link TaskManagerOptions#SHUFFLE_MEMORY_MIN},
+	 * and {@link TaskManagerOptions#SHUFFLE_MEMORY_MAX} instead
 	 */
 	@Deprecated
 	public static final ConfigOption<Integer> NETWORK_NUM_BUFFERS =
@@ -90,7 +77,10 @@ public class NettyShuffleEnvironmentOptions {
 
 	/**
 	 * Fraction of JVM memory to use for network buffers.
+	 *
+	 * @deprecated use {@link TaskManagerOptions#SHUFFLE_MEMORY_FRACTION} instead
 	 */
+	@Deprecated
 	public static final ConfigOption<Float> NETWORK_BUFFERS_MEMORY_FRACTION =
 		key("taskmanager.network.memory.fraction")
 			.defaultValue(0.1f)
@@ -102,7 +92,10 @@ public class NettyShuffleEnvironmentOptions {
 
 	/**
 	 * Minimum memory size for network buffers.
+	 *
+	 * @deprecated use {@link TaskManagerOptions#SHUFFLE_MEMORY_MIN} instead
 	 */
+	@Deprecated
 	public static final ConfigOption<String> NETWORK_BUFFERS_MEMORY_MIN =
 		key("taskmanager.network.memory.min")
 			.defaultValue("64mb")
@@ -110,7 +103,10 @@ public class NettyShuffleEnvironmentOptions {
 
 	/**
 	 * Maximum memory size for network buffers.
+	 *
+	 * @deprecated use {@link TaskManagerOptions#SHUFFLE_MEMORY_MAX} instead
 	 */
+	@Deprecated
 	public static final ConfigOption<String> NETWORK_BUFFERS_MEMORY_MAX =
 		key("taskmanager.network.memory.max")
 			.defaultValue("1gb")

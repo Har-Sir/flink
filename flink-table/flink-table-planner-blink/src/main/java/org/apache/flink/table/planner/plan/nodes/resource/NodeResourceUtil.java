@@ -34,8 +34,8 @@ public class NodeResourceUtil {
 	 * Build resourceSpec from managedMem.
 	 */
 	public static ResourceSpec fromManagedMem(int managedMem) {
-		ResourceSpec.Builder builder = ResourceSpec.newBuilder();
-		builder.setManagedMemoryInMB(managedMem);
+		ResourceSpec.Builder builder = ResourceSpec.newBuilder(0.0, 0);
+		builder.setManagedMemoryMB(managedMem);
 		return builder.build();
 	}
 }

@@ -78,29 +78,26 @@ function print_mem_use {
     fi
 }
 
+BACKUP_FLINK_DIRS="conf lib plugins"
+
 function backup_flink_dir() {
     mkdir -p "${TEST_DATA_DIR}/tmp/backup"
     # Note: not copying all directory tree, as it may take some time on some file systems.
-    cp -r "${FLINK_DIR}/conf" "${TEST_DATA_DIR}/tmp/backup/"
-    cp -r "${FLINK_DIR}/lib" "${TEST_DATA_DIR}/tmp/backup/"
+    for dirname in ${BACKUP_FLINK_DIRS}; do
+        cp -r "${FLINK_DIR}/${dirname}" "${TEST_DATA_DIR}/tmp/backup/"
+    done
 }
 
 function revert_flink_dir() {
 
-    if [ -d "${TEST_DATA_DIR}/tmp/backup/conf" ]; then
-        rm -rf "${FLINK_DIR}/conf"
-        mv "${TEST_DATA_DIR}/tmp/backup/conf" "${FLINK_DIR}/"
-    fi
-
-    if [ -d "${TEST_DATA_DIR}/tmp/backup/lib" ]; then
-        rm -rf "${FLINK_DIR}/lib"
-        mv "${TEST_DATA_DIR}/tmp/backup/lib" "${FLINK_DIR}/"
-    fi
+    for dirname in ${BACKUP_FLINK_DIRS}; do
+        if [ -d "${TEST_DATA_DIR}/tmp/backup/${dirname}" ]; then
+            rm -rf "${FLINK_DIR}/${dirname}"
+            mv "${TEST_DATA_DIR}/tmp/backup/${dirname}" "${FLINK_DIR}/"
+        fi
+    done
 
     rm -r "${TEST_DATA_DIR}/tmp/backup"
-
-    # By default, the plugins dir doesn't exist. Some tests may have created it.
-    rm -r "${FLINK_DIR}/plugins"
 
     REST_PROTOCOL="http"
     CURL_SSL_ARGS=""
@@ -157,7 +154,7 @@ function create_ha_config() {
     jobmanager.rpc.address: localhost
     jobmanager.rpc.port: 6123
     jobmanager.heap.size: 1024m
-    taskmanager.heap.size: 1024m
+    taskmanager.memory.total-process.size: 1024m
     taskmanager.numberOfTaskSlots: ${TASK_SLOTS_PER_TM_HA}
 
     #==============================================================================
@@ -332,6 +329,7 @@ function check_logs_for_errors {
       | grep -v "org.apache.flink.fs.shaded.hadoop3.org.apache.commons.beanutils.FluentPropertyBeanIntrospector  - Error when creating PropertyDescriptor for public final void org.apache.flink.fs.shaded.hadoop3.org.apache.commons.configuration2.AbstractConfiguration.setProperty(java.lang.String,java.lang.Object)! Ignoring this property." \
       | grep -v "Error while loading kafka-version.properties :null" \
       | grep -v "Failed Elasticsearch item request" \
+      | grep -v "[Terror] modules" \
       | grep -ic "error" || true)
   if [[ ${error_count} -gt 0 ]]; then
     echo "Found error in log files:"
@@ -366,6 +364,7 @@ function check_logs_for_exceptions {
    | grep -v "org.apache.flink.runtime.checkpoint.CheckpointException" \
    | grep -v "org.elasticsearch.ElasticsearchException" \
    | grep -v "Elasticsearch exception" \
+   | grep -v "org.apache.flink.runtime.JobException: Recovery is suppressed" \
    | grep -ic "exception" || true)
   if [[ ${exception_count} -gt 0 ]]; then
     echo "Found exception in log files:"
@@ -747,3 +746,16 @@ function retry_times() {
     echo "Command: ${command} failed ${retriesNumber} times."
     return 1
 }
+
+JOB_ID_REGEX_EXTRACTOR=".*JobID ([0-9,a-f]*)"
+
+function extract_job_id_from_job_submission_return() {
+    if [[ $1 =~ $JOB_ID_REGEX_EXTRACTOR ]];
+        then
+            JOB_ID="${BASH_REMATCH[1]}";
+        else
+            JOB_ID=""
+        fi
+    echo "$JOB_ID"
+}
+

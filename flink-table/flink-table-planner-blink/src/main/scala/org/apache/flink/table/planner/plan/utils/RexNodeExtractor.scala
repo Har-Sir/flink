@@ -19,8 +19,9 @@
 package org.apache.flink.table.planner.plan.utils
 
 import org.apache.flink.table.api.TableException
-import org.apache.flink.table.catalog.{FunctionCatalog, FunctionLookup}
+import org.apache.flink.table.catalog.{CatalogManager, FunctionCatalog, FunctionLookup, UnresolvedIdentifier}
 import org.apache.flink.table.dataformat.DataFormatConverters.{LocalDateConverter, LocalDateTimeConverter, LocalTimeConverter}
+import org.apache.flink.table.dataformat.SqlTimestamp
 import org.apache.flink.table.expressions._
 import org.apache.flink.table.expressions.utils.ApiExpressionUtils._
 import org.apache.flink.table.functions.BuiltInFunctionDefinitions.{AND, CAST, OR}
@@ -28,16 +29,18 @@ import org.apache.flink.table.planner.calcite.FlinkTypeFactory
 import org.apache.flink.table.planner.utils.Logging
 import org.apache.flink.table.runtime.functions.SqlDateTimeUtils.unixTimestampToLocalDateTime
 import org.apache.flink.table.runtime.types.LogicalTypeDataTypeConverter.fromLogicalTypeToDataType
+import org.apache.flink.table.types.DataType
 import org.apache.flink.table.types.logical.LogicalTypeRoot._
 import org.apache.flink.util.Preconditions
-
 import org.apache.calcite.plan.RelOptUtil
 import org.apache.calcite.rex._
 import org.apache.calcite.sql.fun.{SqlStdOperatorTable, SqlTrimFunction}
 import org.apache.calcite.sql.{SqlFunction, SqlPostfixOperator}
-import org.apache.calcite.util.Util
-
+import org.apache.calcite.util.{TimestampString, Util}
+import java.util
 import java.util.{TimeZone, List => JList}
+
+import org.apache.flink.table.runtime.functions.SqlDateTimeUtils
 
 import scala.collection.JavaConversions._
 import scala.collection.JavaConverters._
@@ -90,6 +93,7 @@ object RexNodeExtractor extends Logging {
       inputFieldNames: JList[String],
       rexBuilder: RexBuilder,
       functionCatalog: FunctionCatalog,
+      catalogManager: CatalogManager,
       timeZone: TimeZone): (Array[Expression], Array[RexNode]) = {
     // converts the expanded expression to conjunctive normal form,
     // like "(a AND b) OR c" will be converted to "(a OR c) AND (b OR c)"
@@ -100,7 +104,8 @@ object RexNodeExtractor extends Logging {
     val convertedExpressions = new mutable.ArrayBuffer[Expression]
     val unconvertedRexNodes = new mutable.ArrayBuffer[RexNode]
     val inputNames = inputFieldNames.asScala.toArray
-    val converter = new RexNodeToExpressionConverter(inputNames, functionCatalog, timeZone)
+    val converter = new RexNodeToExpressionConverter(
+      inputNames, functionCatalog, catalogManager, timeZone)
 
     conjunctions.asScala.foreach(rex => {
       rex.accept(converter) match {
@@ -293,10 +298,11 @@ class RefFieldAccessorVisitor(usedFields: Array[Int]) extends RexVisitorImpl[Uni
 class RexNodeToExpressionConverter(
     inputNames: Array[String],
     functionCatalog: FunctionCatalog,
+    catalogManager: CatalogManager,
     timeZone: TimeZone)
-  extends RexVisitor[Option[Expression]] {
+  extends RexVisitor[Option[ResolvedExpression]] {
 
-  override def visitInputRef(inputRef: RexInputRef): Option[Expression] = {
+  override def visitInputRef(inputRef: RexInputRef): Option[ResolvedExpression] = {
     Preconditions.checkArgument(inputRef.getIndex < inputNames.length)
     Some(new FieldReferenceExpression(
       inputNames(inputRef.getIndex),
@@ -306,14 +312,14 @@ class RexNodeToExpressionConverter(
     ))
   }
 
-  override def visitTableInputRef(rexTableInputRef: RexTableInputRef): Option[Expression] =
+  override def visitTableInputRef(rexTableInputRef: RexTableInputRef): Option[ResolvedExpression] =
     visitInputRef(rexTableInputRef)
 
-  override def visitLocalRef(localRef: RexLocalRef): Option[Expression] = {
+  override def visitLocalRef(localRef: RexLocalRef): Option[ResolvedExpression] = {
     throw new TableException("Bug: RexLocalRef should have been expanded")
   }
 
-  override def visitLiteral(literal: RexLiteral): Option[Expression] = {
+  override def visitLiteral(literal: RexLiteral): Option[ResolvedExpression] = {
     // TODO support SqlTrimFunction.Flag
     literal.getValue match {
       case _: SqlTrimFunction.Flag => return None
@@ -333,8 +339,10 @@ class RexNodeToExpressionConverter(
         LocalTimeConverter.INSTANCE.toExternal(v)
 
       case TIMESTAMP_WITHOUT_TIME_ZONE =>
-        val v = literal.getValueAs(classOf[java.lang.Long])
-        LocalDateTimeConverter.INSTANCE.toExternal(v)
+        val v = literal.getValueAs(classOf[TimestampString])
+        val millisecond = v.getMillisSinceEpoch
+        val nanoOfMillisecond = SqlDateTimeUtils.getNanoOfMillisSinceEpoch(v.toString)
+        SqlTimestamp.fromEpochMillis(millisecond, nanoOfMillisecond).toLocalDateTime
 
       case TIMESTAMP_WITH_LOCAL_TIME_ZONE =>
         val v = literal.getValueAs(classOf[java.lang.Long])
@@ -384,10 +392,12 @@ class RexNodeToExpressionConverter(
       fromLogicalTypeToDataType(literalType)))
   }
 
-  override def visitCall(rexCall: RexCall): Option[Expression] = {
+  override def visitCall(rexCall: RexCall): Option[ResolvedExpression] = {
     val operands = rexCall.getOperands.map(
       operand => operand.accept(this).orNull
     )
+
+    val outputType = fromLogicalTypeToDataType(FlinkTypeFactory.toLogicalType(rexCall.getType))
 
     // return null if we cannot translate all the operands of the call
     if (operands.contains(null)) {
@@ -395,42 +405,49 @@ class RexNodeToExpressionConverter(
     } else {
       rexCall.getOperator match {
         case SqlStdOperatorTable.OR =>
-          Option(operands.reduceLeft { (l, r) => unresolvedCall(OR, l, r) })
+          Option(operands.reduceLeft((l, r) => new CallExpression(OR, Seq(l, r), outputType)))
         case SqlStdOperatorTable.AND =>
-          Option(operands.reduceLeft { (l, r) => unresolvedCall(AND, l, r) })
+          Option(operands.reduceLeft((l, r) => new CallExpression(AND, Seq(l, r), outputType)))
         case SqlStdOperatorTable.CAST =>
-          Option(unresolvedCall(CAST, operands.head,
-            typeLiteral(fromLogicalTypeToDataType(
-              FlinkTypeFactory.toLogicalType(rexCall.getType)))))
-        case function: SqlFunction =>
-          lookupFunction(replace(function.getName), operands)
-        case postfix: SqlPostfixOperator =>
-          lookupFunction(replace(postfix.getName), operands)
+          Option(new CallExpression(CAST, Seq(operands.head, typeLiteral(outputType)), outputType))
+        case _: SqlFunction | _: SqlPostfixOperator =>
+          val names = new util.ArrayList[String](rexCall.getOperator.getNameAsId.names)
+          names.set(names.size() - 1, replace(names.get(names.size() - 1)))
+          val id = UnresolvedIdentifier.of(names.asScala.toArray: _*)
+          lookupFunction(id, operands, outputType)
         case operator@_ =>
-          lookupFunction(replace(s"${operator.getKind}"), operands)
+          lookupFunction(
+            UnresolvedIdentifier.of(replace(s"${operator.getKind}")),
+            operands,
+            outputType)
       }
     }
   }
 
-  override def visitFieldAccess(fieldAccess: RexFieldAccess): Option[Expression] = None
+  override def visitFieldAccess(fieldAccess: RexFieldAccess): Option[ResolvedExpression] = None
 
-  override def visitCorrelVariable(correlVariable: RexCorrelVariable): Option[Expression] = None
+  override def visitCorrelVariable(
+      correlVariable: RexCorrelVariable): Option[ResolvedExpression] = None
 
-  override def visitRangeRef(rangeRef: RexRangeRef): Option[Expression] = None
+  override def visitRangeRef(rangeRef: RexRangeRef): Option[ResolvedExpression] = None
 
-  override def visitSubQuery(subQuery: RexSubQuery): Option[Expression] = None
+  override def visitSubQuery(subQuery: RexSubQuery): Option[ResolvedExpression] = None
 
-  override def visitDynamicParam(dynamicParam: RexDynamicParam): Option[Expression] = None
+  override def visitDynamicParam(dynamicParam: RexDynamicParam): Option[ResolvedExpression] = None
 
-  override def visitOver(over: RexOver): Option[Expression] = None
+  override def visitOver(over: RexOver): Option[ResolvedExpression] = None
 
-  override def visitPatternFieldRef(fieldRef: RexPatternFieldRef): Option[Expression] = None
+  override def visitPatternFieldRef(
+      fieldRef: RexPatternFieldRef): Option[ResolvedExpression] = None
 
-  private def lookupFunction(name: String, operands: Seq[Expression]): Option[Expression] = {
-    Try(functionCatalog.lookupFunction(name)) match {
+  private def lookupFunction(
+      identifier: UnresolvedIdentifier,
+      operands: Seq[ResolvedExpression],
+      outputType: DataType): Option[ResolvedExpression] = {
+    Try(functionCatalog.lookupFunction(identifier)) match {
       case Success(f: java.util.Optional[FunctionLookup.Result]) =>
         if (f.isPresent) {
-          Some(unresolvedCall(f.get().getFunctionDefinition, operands: _*))
+          Some(new CallExpression(f.get().getFunctionDefinition, operands, outputType))
         } else {
           None
         }

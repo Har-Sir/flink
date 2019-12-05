@@ -19,11 +19,12 @@
 package org.apache.flink.yarn;
 
 import org.apache.flink.api.java.tuple.Tuple2;
+import org.apache.flink.configuration.ConfigOptions;
 import org.apache.flink.configuration.ResourceManagerOptions;
 import org.apache.flink.runtime.clusterframework.BootstrapTools;
 import org.apache.flink.runtime.clusterframework.ContaineredTaskManagerParameters;
+import org.apache.flink.runtime.entrypoint.parser.CommandLineOptions;
 import org.apache.flink.runtime.util.HadoopUtils;
-import org.apache.flink.util.FileUtils;
 import org.apache.flink.util.StringUtils;
 
 import org.apache.hadoop.conf.Configuration;
@@ -62,8 +63,8 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.UUID;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Stream;
 
 import static org.apache.flink.yarn.YarnConfigKeys.ENV_FLINK_CLASSPATH;
 
@@ -129,7 +130,7 @@ public final class Utils {
 	}
 
 	/**
-	 * Copy a local file to a remote file system.
+	 * Copy a local file to a remote file system and register as Local Resource.
 	 *
 	 * @param fs
 	 * 		remote filesystem
@@ -145,6 +146,36 @@ public final class Utils {
 	 * @return Path to remote file (usually hdfs)
 	 */
 	static Tuple2<Path, LocalResource> setupLocalResource(
+		FileSystem fs,
+		String appId,
+		Path localSrcPath,
+		Path homedir,
+		String relativeTargetPath) throws IOException {
+
+		File localFile = new File(localSrcPath.toUri().getPath());
+		Tuple2<Path, Long> remoteFileInfo = uploadLocalFileToRemote(fs, appId, localSrcPath, homedir, relativeTargetPath);
+		// now create the resource instance
+		LocalResource resource = registerLocalResource(remoteFileInfo.f0, localFile.length(), remoteFileInfo.f1);
+		return Tuple2.of(remoteFileInfo.f0, resource);
+	}
+
+	/**
+	 * Copy a local file to a remote file system.
+	 *
+	 * @param fs
+	 * 		remote filesystem
+	 * @param appId
+	 * 		application ID
+	 * @param localSrcPath
+	 * 		path to the local file
+	 * @param homedir
+	 * 		remote home directory base (will be extended)
+	 * @param relativeTargetPath
+	 * 		relative target path of the file (will be prefixed be the full home directory we set up)
+	 *
+	 * @return Path to remote file (usually hdfs)
+	 */
+	static Tuple2<Path, Long> uploadLocalFileToRemote(
 		FileSystem fs,
 		String appId,
 		Path localSrcPath,
@@ -201,10 +232,7 @@ public final class Utils {
 			dstModificationTime = localFile.lastModified();
 			LOG.debug("Failed to fetch remote modification time from {}, using local timestamp {}", dst, dstModificationTime);
 		}
-
-		// now create the resource instance
-		LocalResource resource = registerLocalResource(dst, localFile.length(), dstModificationTime);
-		return Tuple2.of(dst, resource);
+		return new Tuple2<>(dst, dstModificationTime);
 	}
 
 	/**
@@ -397,8 +425,8 @@ public final class Utils {
 	 *		 The environment variables.
 	 * @param tmParams
 	 *		 The TaskExecutor container memory parameters.
-	 * @param taskManagerConfig
-	 *		 The configuration for the TaskExecutors.
+	 * @param taskManagerDynamicProperties
+	 *		 The dynamic configurations to be updated for the TaskExecutors based on client uploaded Flink config.
 	 * @param workingDirectory
 	 *		 The current application master container's working directory.
 	 * @param taskManagerMainClass
@@ -416,7 +444,7 @@ public final class Utils {
 		YarnConfiguration yarnConfig,
 		Map<String, String> env,
 		ContaineredTaskManagerParameters tmParams,
-		org.apache.flink.configuration.Configuration taskManagerConfig,
+		String taskManagerDynamicProperties,
 		String workingDirectory,
 		Class<?> taskManagerMainClass,
 		Logger log) throws Exception {
@@ -482,47 +510,18 @@ public final class Utils {
 		}
 
 		// register Flink Jar with remote HDFS
+		final String flinkJarPath;
 		final LocalResource flinkJar;
 		{
 			Path remoteJarPath = new Path(remoteFlinkJarPath);
 			FileSystem fs = remoteJarPath.getFileSystem(yarnConfig);
+			flinkJarPath = remoteJarPath.getName();
 			flinkJar = registerLocalResource(fs, remoteJarPath);
 		}
 
-		// register conf with local fs
-		final LocalResource flinkConf;
-		{
-			// write the TaskManager configuration to a local file
-			final File taskManagerConfigFile =
-					new File(workingDirectory, UUID.randomUUID() + "-taskmanager-conf.yaml");
-			log.debug("Writing TaskManager configuration to {}", taskManagerConfigFile.getAbsolutePath());
-			BootstrapTools.writeConfiguration(taskManagerConfig, taskManagerConfigFile);
-
-			try {
-				Path homeDirPath = new Path(clientHomeDir);
-				FileSystem fs = homeDirPath.getFileSystem(yarnConfig);
-
-				flinkConf = setupLocalResource(
-					fs,
-					appId,
-					new Path(taskManagerConfigFile.toURI()),
-					homeDirPath,
-					"").f1;
-
-				log.debug("Prepared local resource for modified yaml: {}", flinkConf);
-			} finally {
-				try {
-					FileUtils.deleteFileOrDirectory(taskManagerConfigFile);
-				} catch (IOException e) {
-					log.info("Could not delete temporary configuration file " +
-						taskManagerConfigFile.getAbsolutePath() + '.', e);
-				}
-			}
-		}
-
 		Map<String, LocalResource> taskManagerLocalResources = new HashMap<>();
-		taskManagerLocalResources.put("flink.jar", flinkJar);
-		taskManagerLocalResources.put("flink-conf.yaml", flinkConf);
+
+		taskManagerLocalResources.put(flinkJarPath, flinkJar);
 
 		//To support Yarn Secure Integration Test Scenario
 		if (yarnConfResource != null) {
@@ -555,7 +554,7 @@ public final class Utils {
 
 		String launchCommand = BootstrapTools.getTaskManagerShellCommand(
 				flinkConfig, tmParams, ".", ApplicationConstants.LOG_DIR_EXPANSION_VAR,
-				hasLogback, hasLog4j, hasKrb5, taskManagerMainClass);
+				hasLogback, hasLog4j, hasKrb5, taskManagerMainClass, taskManagerDynamicProperties);
 
 		if (log.isDebugEnabled()) {
 			log.debug("Starting TaskManagers with command: " + launchCommand);
@@ -636,6 +635,34 @@ public final class Utils {
 		if (!condition) {
 			throw new RuntimeException(String.format(message, values));
 		}
+	}
+
+	/**
+	 * Get dynamic properties based on two Flink configuration. If base config does not contain and target config
+	 * contains the key or the value is different, it should be added to results. Otherwise, if the base config contains
+	 * and target config does not contain the key, it will be ignored.
+	 * @param baseConfig The base configuration.
+	 * @param targetConfig The target configuration.
+	 * @return Dynamic properties as string, separated by space.
+	 */
+	static String getDynamicProperties(
+		org.apache.flink.configuration.Configuration baseConfig,
+		org.apache.flink.configuration.Configuration targetConfig) {
+
+		String[] newAddedConfigs = targetConfig.keySet().stream().flatMap(
+			(String key) -> {
+				final String baseValue = baseConfig.getString(ConfigOptions.key(key).stringType().noDefaultValue());
+				final String targetValue = targetConfig.getString(ConfigOptions.key(key).stringType().noDefaultValue());
+
+				if (!baseConfig.keySet().contains(key) || !baseValue.equals(targetValue)) {
+					return Stream.of("-" + CommandLineOptions.DYNAMIC_PROPERTY_OPTION.getOpt() + key +
+						CommandLineOptions.DYNAMIC_PROPERTY_OPTION.getValueSeparator() + targetValue);
+				} else {
+					return Stream.empty();
+				}
+			})
+			.toArray(String[]::new);
+		return String.join(" ", newAddedConfigs);
 	}
 
 }
